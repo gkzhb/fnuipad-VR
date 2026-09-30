@@ -2,7 +2,7 @@
 Mapping engine - processes VR input through mapping rules
 """
 
-import openvr
+from _openvr import get_backend
 from typing import Dict, Set, Optional
 from dataclasses import dataclass, field
 
@@ -30,12 +30,12 @@ class MappingEngine:
     
     def __init__(self, profile: MappingProfile):
         self.profile = profile
+        self.vrsys = get_backend()
         self.gamepad = LinuxGamepad(
             name=profile.device_name,
             vendor=profile.device_vendor,
             product=profile.device_product,
         )
-        self.vrsys = openvr.VRSystem()
         
         # Current controller states
         self.left = VRControllerState()
@@ -52,82 +52,12 @@ class MappingEngine:
         self._right_id: Optional[int] = None
     
     def _find_controllers(self):
-        """Find left and right controller indices"""
-        for i in range(openvr.k_unMaxTrackedDeviceCount):
-            device_class = self.vrsys.getTrackedDeviceClass(i)
-            if device_class == openvr.TrackedDeviceClass_Controller:
-                role = self.vrsys.getControllerRoleForTrackedDeviceIndex(i)
-                if role == openvr.TrackedControllerRole_LeftHand:
-                    self._left_id = i
-                elif role == openvr.TrackedControllerRole_RightHand:
-                    self._right_id = i
-    
-    def _read_controller(self, controller_id: int) -> VRControllerState:
-        """Read all inputs from a VR controller"""
-        state = VRControllerState()
-        
-        result, ctrl = self.vrsys.getControllerState(controller_id)
-        if not result:
-            return state
-        
-        pressed = ctrl.ulButtonPressed
-        touched = ctrl.ulButtonTouched
-        
-        # Button mappings to OpenVR constants
-        button_bits = {
-            "trigger_click": openvr.k_EButton_SteamVR_Trigger,
-            "grip_click": openvr.k_EButton_Grip,
-            "trackpad_click": openvr.k_EButton_SteamVR_Touchpad,
-            "menu": openvr.k_EButton_ApplicationMenu,
-            "system": openvr.k_EButton_System,
-            "a_button": openvr.k_EButton_A,
-            "thumbstick_click": openvr.k_EButton_SteamVR_Touchpad,  # Often same as trackpad
-        }
-        
-        # Try to get thumbstick click separately if available
-        # On Quest/Index this is typically k_EButton_SteamVR_Touchpad or a separate button
-        
-        for name, bit in button_bits.items():
-            state.buttons[name] = bool(pressed & (1 << bit))
-        
-        # Touch states
-        touch_bits = {
-            "trigger_touch": openvr.k_EButton_SteamVR_Trigger,
-            "grip_touch": openvr.k_EButton_Grip,
-            "trackpad_touch": openvr.k_EButton_SteamVR_Touchpad,
-            "thumbstick_touch": openvr.k_EButton_SteamVR_Touchpad,
-            "a_touch": openvr.k_EButton_A,
-        }
-        
-        for name, bit in touch_bits.items():
-            state.buttons[name] = bool(touched & (1 << bit))
-        
-        # Quest-specific buttons (X/Y on left, A/B on right)
-        # These map to k_EButton_A and k_EButton_ApplicationMenu typically
-        state.buttons["x_button"] = bool(pressed & (1 << openvr.k_EButton_A))
-        state.buttons["y_button"] = bool(pressed & (1 << openvr.k_EButton_ApplicationMenu))
-        state.buttons["b_button"] = bool(pressed & (1 << openvr.k_EButton_A))
-        
-        # Axes
-        if ctrl.rAxis:
-            # Axis 0: Trackpad/Thumbstick
-            state.axes["trackpad_x"] = ctrl.rAxis[0].x
-            state.axes["trackpad_y"] = ctrl.rAxis[0].y
-            state.axes["thumbstick_x"] = ctrl.rAxis[0].x
-            state.axes["thumbstick_y"] = ctrl.rAxis[0].y
-            
-            # Axis 1: Trigger
-            if len(ctrl.rAxis) > 1:
-                state.axes["trigger"] = ctrl.rAxis[1].x
-            
-            # Axis 2: Grip (if analog)
-            if len(ctrl.rAxis) > 2:
-                state.axes["grip"] = ctrl.rAxis[2].x
-            else:
-                # Binary grip as axis
-                state.axes["grip"] = 1.0 if state.buttons.get("grip_click") else 0.0
-        
-        return state
+        """Stable hand names; device indices are rediscovered by the backend."""
+        self._left_id, self._right_id = 'left', 'right'
+
+    def _read_controller(self, controller_id: str) -> VRControllerState:
+        snapshot = self.vrsys.controller(controller_id)
+        return VRControllerState(dict(snapshot.buttons), dict(snapshot.axes))
     
     def _get_state(self, controller: str) -> VRControllerState:
         """Get state for a controller by name"""
@@ -248,6 +178,7 @@ class MappingEngine:
     
     def update(self):
         """Main update - read inputs, process mappings, update gamepad"""
+        self.vrsys.update()
         # Find controllers if needed
         if self._left_id is None or self._right_id is None:
             self._find_controllers()

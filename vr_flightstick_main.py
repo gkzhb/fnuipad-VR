@@ -3,7 +3,7 @@
 VR Flight Stick (Stick Yoke) + Throttle - Main entry point
 
 Runs the VR flight stick simulator.
-Requires SteamVR to be running.
+Requires SteamVR; connects as an OpenVR Background application.
 
 Controls:
     Right Controller: Stick yoke
@@ -28,7 +28,7 @@ import signal
 import argparse
 from dataclasses import asdict
 
-import openvr
+import _openvr as vr_backend
 
 from _flightstick import (
     FlightStick, FlightStickConfig,
@@ -69,16 +69,16 @@ class FlightStickApplication:
         print(f"  Range: {self.config.throttle_range:.2f}m")
         print()
 
-        # Initialize OpenVR
-        print("Initializing OpenVR...")
+        # Never acquire the foreground VR scene.
+        print("Initializing OpenVR Background...")
         try:
-            openvr.init(openvr.VRApplication_Overlay)
-        except openvr.OpenVRError as e:
-            print(f"Error: Could not initialize OpenVR: {e}")
-            print("Make sure SteamVR is running!")
+            vr_backend.init()
+        except vr_backend.OpenVRError as e:
+            print(f"Error: Could not initialize OpenVR Background: {e}")
+            print("Check that SteamVR is running and controllers are connected.")
             return 1
 
-        print("OpenVR initialized")
+        print("OpenVR Background initialized")
         print()
 
         # Create flight stick
@@ -91,7 +91,7 @@ class FlightStickApplication:
             print("Make sure you have permissions for /dev/uinput:")
             print("  sudo usermod -aG input $USER")
             print("  sudo modprobe uinput")
-            openvr.shutdown()
+            vr_backend.shutdown()
             return 1
 
         print("Flight stick created")
@@ -158,10 +158,12 @@ class FlightStickApplication:
                                   end='', flush=True)
                             last_status_time = current_time
 
-                except openvr.OpenVRError as e:
+                except vr_backend.SessionEnded as e:
+                    print(e)
+                    return 0
+                except vr_backend.OpenVRError as e:
                     print(f"\nOpenVR error: {e}")
-                    time.sleep(1)
-                    continue
+                    return 1
 
                 elapsed = time.perf_counter() - start
                 sleep_time = frame_time - elapsed
@@ -178,7 +180,7 @@ class FlightStickApplication:
                     print(f"  stick_anchor: {self.config.stick_anchor}")
                     print(f"  throttle_anchor: {self.config.throttle_anchor}")
                 self.flightstick.close()
-            openvr.shutdown()
+            vr_backend.shutdown()
             print("Done")
 
         return 0

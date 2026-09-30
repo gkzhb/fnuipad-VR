@@ -1,8 +1,18 @@
 # VR Gamepad Mapper
 
-A Linux tool that maps VR controller inputs to a virtual gamepad using OpenVR and uinput. Play non-VR games with your VR controllers.
+A Linux tool that maps VR controller inputs to a virtual gamepad using OpenVR Background and uinput.
 
-Perfect for flight sims in VR where you need a reasonable amount of inputs without taking off your headset to find keyboard keys. With 32 buttons, 8 axes, and chord support, you can map all essential flight controls to your VR controllers.
+**SteamVR coexistence:** all launchers connect as `VRApplication_Background`.
+They never create an OpenXR session, acquire a scene, capture input focus or wait
+for compositor frames. The previous OpenXR headless implementation was observed
+to become `OpenXRScene` on SteamVR and cause games to be terminated; it remains
+as unselected legacy code only. Do not run it alongside a game.
+
+**Limitations:** background legacy controller input depends on SteamVR and the
+controller driver. Both launch orders and input with the game focused still need
+hardware acceptance. Old wheel/hand/stick/throttle overlays remain disabled;
+display flags are accepted but have no visual effect. Physics and calibration
+remain available. Existing mapping profiles and uinput output are preserved.
 
 ## Features
 
@@ -16,19 +26,77 @@ Perfect for flight sims in VR where you need a reasonable amount of inputs witho
 ## Requirements
 
 - Linux with uinput support
-- Python 3.8+
-- SteamVR
-- Python packages: `evdev`, `openvr`
+- Python 3.10+
+- SteamVR running with paired controllers
+- Python packages from `requirements.txt` (`openvr==1.26.701`)
+- Runtime/controller pairing must already be configured
 
 ## Installation
 
-### 1. Install dependencies
+### NixOS / Nix dev shell (recommended)
+
+The flake provides Python 3.12, pip, Nix-built `evdev`, Tk (GUI), NumPy,
+GLFW, PyOpenGL, the OpenXR loader and GLX/EGL dispatch libraries (`libglvnd`).
+`openvr` is installed with `--no-deps` into the project `.venv` via
+**Tsinghua PyPI**, not into the system Python. Its transitive dependencies come
+from Nix, avoiding incompatible manylinux wheels. Entering the shell does not run
+pip automatically.
 
 ```bash
-pip install evdev openvr
+nix develop
+setup-python
+source .venv/bin/activate
+python tests/smoke_nix.py
+python -m pip check
+python -m unittest discover -s tests -v
+python vr_gamepad_main.py
 ```
 
-### 2. Setup permissions
+If `flake.nix` is still untracked in a Git checkout, use `nix develop path:.`
+(Nix's default Git source excludes untracked files). Re-enter the shell and activate
+the venv for later sessions. `setup-python` records the Nix Python environment
+path; when it changes (or an old unmarked venv exists), it preserves `.venv` as
+`.venv.backup.<timestamp>.<pid>` and creates a fresh environment. Backups are not
+deleted automatically. Activate the new venv again after running the helper.
+Do not install transitive dependencies into this venv with `pip -r requirements.txt`;
+use `setup-python`. `tests/smoke_nix.py` verifies that dependencies load from
+`/nix/store`, loads native libraries and checks real binding structures without a headset.
+The helper pins `openvr==1.26.701` and `setuptools==80.9.0` (OpenVR requires
+`pkg_resources`, removed in setuptools 81+); this is a development venv, not a fully
+Nix-locked Python package closure. `flake.lock` pins nixpkgs.
+
+The nixpkgs source uses the Tsinghua `nix-channels` mirror. This is distinct from
+PyPI: Nix binary substitutes still use your configured Nix caches. The project
+does not modify system-wide caches or trust settings. If cache downloads are slow,
+configure a trusted Nix mirror in your NixOS configuration separately.
+
+Start SteamVR separately. `XR_RUNTIME_JSON` does not select the default OpenVR
+backend. The shell retains native graphics/loader dependencies for compatibility;
+it does not install or start SteamVR.
+
+On NixOS, configure uinput declaratively rather than running `setup-script.sh`:
+
+```nix
+# In configuration.nix; replace YOUR_USER with your login name.
+boot.kernelModules = [ "uinput" ];
+users.users.YOUR_USER.extraGroups = [ "input" ];
+services.udev.extraRules = ''
+  KERNEL=="uinput", GROUP="input", MODE="0660"
+  SUBSYSTEM=="input", ATTRS{name}=="VR Gamepad*", ENV{ID_INPUT_JOYSTICK}="1"
+  SUBSYSTEM=="input", ATTRS{name}=="Test Gamepad*", ENV{ID_INPUT_JOYSTICK}="1"
+'';
+```
+
+Apply with your normal `nixos-rebuild` workflow and log out/back in. Membership in
+`input` grants access to input devices; only grant it to trusted local users.
+
+### Other Linux distributions: install dependencies
+
+```bash
+python -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+```
+
+### Other Linux distributions: setup permissions
 
 Run the setup script (requires sudo):
 
@@ -48,6 +116,44 @@ sudo udevadm control --reload-rules
 Log out and back in for group changes to take effect.
 
 ## Usage
+
+### Launcher
+
+```bash
+./start.sh                              # Default gamepad mapper
+./start.sh gamepad -c default-profile.json
+./start.sh wheel --degrees 540 --no-wheel
+./start.sh flightstick --edit
+./start.sh gamepad --help
+```
+
+The launcher enters the locked Nix dev shell, runs the idempotent `setup-python`
+helper, and starts the selected application. It works from any directory and
+preserves application arguments and exit status. Relative
+profile paths resolve from the project directory; use absolute paths for external
+profiles. First launch requires network access for uncached dependencies.
+
+### SteamVR background setup and acceptance
+
+Start SteamVR and pair/wake the controllers, then use `./start.sh` (gamepad),
+`./start.sh wheel --no-wheel`, or `./start.sh flightstick --edit`.
+
+Input uses legacy OpenVR controller state. Axis-type properties distinguish
+trackpads from thumbsticks. For Touch-style legacy emulation, A/X use the A bit
+and B/Y use ApplicationMenu; other driver mappings may differ. System buttons
+are not exposed. JSON input names are unchanged; validate bindings on your device.
+
+Poses use OpenVR seated space (meters, +Y up, -Z forward). Recalibrate anchors
+with `--edit` after switching from OpenXR LOCAL space. Tracking loss clears pose
+validity; disconnect clears input. Quit events are acknowledged and the mapper
+closes its virtual device.
+
+Hardware acceptance (not established by unit tests):
+1. Test game-first and mapper-first launch orders, after stopping any OLD mapper.
+2. Verify `vrserver.txt` classifies the mapper as Background, not OpenXRScene,
+   with no scene transition or Quit/Kill directed at the other application.
+3. With ETS2 focused, verify controller axes/buttons and wheel calibration.
+4. Stop the mapper and disconnect controllers; confirm no stuck input or game exit.
 
 ### Run with default mappings
 
@@ -217,6 +323,17 @@ wine control joy.cpl
 
 ## Testing
 
+Hardware-independent regression tests (no loader/headset/uinput needed):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+These verify action snapshots, focus/session transitions, cleanup, pose conversion,
+haptic units and mapping release. They do **not** establish hardware compatibility.
+For hardware acceptance, test all three entry points, reconnect both controllers,
+remove focus, calibrate anchors and verify input while the target game is running.
+
 Test the virtual gamepad without VR:
 
 ```bash
@@ -262,13 +379,16 @@ sudo usermod -aG input $USER
 # Log out and back in
 ```
 
-### SteamVR not detected
+### OpenVR initialization fails
 
-Make sure SteamVR is running before starting the mapper.
+Start SteamVR and check headset/controller connection. Verify `setup-python`
+completed and the OpenVR native library and SteamVR client can load.
 
-### Controllers not found
+### Controllers produce no input
 
-The mapper searches for controllers when they're available. Make sure your VR headset is on and controllers are paired.
+Pair/wake controllers in SteamVR. Legacy state availability depends on the driver
+and foreground application's input handling. Do not switch to Scene mode as a
+workaround; that can terminate your game. Check foreground-game input on hardware.
 
 ### Game doesn't see all buttons
 
@@ -281,6 +401,10 @@ Run `python wine_setup.py evdev` to enable full button detection in Wine/Proton 
 | `vr_gamepad_main.py` | Main entry point |
 | `_linuxgamepad.py` | Virtual gamepad via uinput |
 | `_mapping.py` | Mapping profile system |
+| `_openvr.py` | Default Background-only input, poses, quit handling and haptics |
+| `_openxr.py` | Unselected legacy backend; unsafe for SteamVR game coexistence |
+| `_vr_input.py` | Runtime-independent controller snapshots |
+| `_xr_bindings.py` | Controller interaction profile bindings |
 | `_mapping_engine.py` | Input processing engine |
 | `config_gui.py` | Configuration GUI |
 | `monitor_gui.py` | Gamepad state monitor |

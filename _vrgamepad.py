@@ -1,9 +1,9 @@
 """
-VR Controller to Gamepad mapper using OpenVR and Linux evdev
+VR Controller to Gamepad mapper using OpenVR Background and Linux evdev
 Maps VR controller inputs to a virtual Xbox-style gamepad
 """
 
-import openvr
+from _openvr import get_backend
 from math import atan2, pi, sqrt
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Set
@@ -110,9 +110,8 @@ class VRGamepad:
     
     def __init__(self, config: Optional[GamepadConfig] = None):
         self.config = config or GamepadConfig()
+        self.vrsys = get_backend()
         self.gamepad = LinuxGamepad()
-        
-        self.vrsys = openvr.VRSystem()
         
         self.left = ControllerState()
         self.right = ControllerState()
@@ -158,31 +157,19 @@ class VRGamepad:
         """Read raw state from a VR controller"""
         state = ControllerState()
         
-        result, controller_state = self.vrsys.getControllerState(controller_id)
-        if not result:
-            return state
-        
-        # Trackpad/thumbstick axis (axis 0 is usually trackpad)
-        if controller_state.rAxis:
-            state.stick_x = controller_state.rAxis[0].x
-            state.stick_y = controller_state.rAxis[0].y
-        
-        # Trigger axis (axis 1)
-        if len(controller_state.rAxis) > 1:
-            state.trigger = controller_state.rAxis[1].x
-        
-        # Parse button bitmask
-        pressed = controller_state.ulButtonPressed
-        touched = controller_state.ulButtonTouched
-        
-        # Common button masks
-        state.trigger_pressed = bool(pressed & (1 << openvr.k_EButton_SteamVR_Trigger))
-        state.grip_pressed = bool(pressed & (1 << openvr.k_EButton_Grip))
-        state.trackpad_pressed = bool(pressed & (1 << openvr.k_EButton_SteamVR_Touchpad))
-        state.trackpad_touched = bool(touched & (1 << openvr.k_EButton_SteamVR_Touchpad))
-        state.menu_pressed = bool(pressed & (1 << openvr.k_EButton_ApplicationMenu))
-        state.system_pressed = bool(pressed & (1 << openvr.k_EButton_System))
-        
+        snapshot = self.vrsys.controller(controller_id)
+        buttons, axes = snapshot.buttons, snapshot.axes
+        stick = 'thumbstick' if 'thumbstick_x' in axes else 'trackpad'
+        state.stick_x = axes.get(stick + '_x', 0.0)
+        state.stick_y = axes.get(stick + '_y', 0.0)
+        state.trigger = axes.get('trigger', 0.0)
+        state.trigger_pressed = buttons.get('trigger_click', False)
+        state.grip_pressed = buttons.get('grip_click', False)
+        state.trackpad_pressed = buttons.get(stick + '_click', False)
+        state.trackpad_touched = buttons.get(stick + '_touch', False)
+        state.menu_pressed = buttons.get('menu', False)
+        state.system_pressed = False  # Reserved for the runtime.
+
         state.stick_zone = self._get_zone(state.stick_x, state.stick_y)
         
         return state
@@ -207,7 +194,7 @@ class VRGamepad:
         """Trigger haptic feedback on controller"""
         if self.config.haptic_intensity > 0:
             duration = int(1000 * intensity * self.config.haptic_intensity)
-            self.vrsys.triggerHapticPulse(controller_id, 0, duration)
+            self.vrsys.haptic(controller_id, duration_ns=duration * 1000)
     
     def _process_left_controller(self, left_id: int):
         """Process left controller inputs"""
@@ -367,20 +354,14 @@ class VRGamepad:
     
     def _find_controllers(self):
         """Find left and right controller indices"""
-        for i in range(openvr.k_unMaxTrackedDeviceCount):
-            device_class = self.vrsys.getTrackedDeviceClass(i)
-            if device_class == openvr.TrackedDeviceClass_Controller:
-                role = self.vrsys.getControllerRoleForTrackedDeviceIndex(i)
-                if role == openvr.TrackedControllerRole_LeftHand:
-                    self._left_id = i
-                elif role == openvr.TrackedControllerRole_RightHand:
-                    self._right_id = i
-    
+        self._left_id, self._right_id = 'left', 'right'
+
     def update(self):
         """
         Main update loop - call this every frame.
         Reads VR controller state and updates virtual gamepad.
         """
+        self.vrsys.update()
         # Find controllers if not yet found
         if self._left_id is None or self._right_id is None:
             self._find_controllers()

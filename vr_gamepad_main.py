@@ -3,7 +3,7 @@
 VR Gamepad - Main entry point
 
 Runs the VR controller to virtual gamepad mapper.
-Requires SteamVR to be running.
+Requires SteamVR; connects as an OpenVR Background application.
 
 Usage:
     python vr_gamepad_main.py                    # Run with default mappings
@@ -19,7 +19,7 @@ import signal
 import argparse
 from pathlib import Path
 
-import openvr
+import _openvr as vr_backend
 
 from _mapping import MappingProfile, create_default_profile
 from _mapping_engine import MappingEngine
@@ -45,16 +45,16 @@ class Application:
         print(f"Mappings: {len(self.profile.mappings)}")
         print()
         
-        # Initialize OpenVR
-        print("Initializing OpenVR...")
+        # Never acquire the foreground VR scene.
+        print("Initializing OpenVR Background...")
         try:
-            openvr.init(openvr.VRApplication_Overlay)
-        except openvr.OpenVRError as e:
-            print(f"Error: Could not initialize OpenVR: {e}")
-            print("Make sure SteamVR is running!")
+            vr_backend.init()
+        except vr_backend.OpenVRError as e:
+            print(f"Error: Could not initialize OpenVR Background: {e}")
+            print("Check that SteamVR is running and controllers are connected.")
             return 1
         
-        print("OpenVR initialized")
+        print("OpenVR Background initialized")
         print()
         
         # Create mapping engine
@@ -67,7 +67,7 @@ class Application:
             print("Make sure you have permissions for /dev/uinput:")
             print("  sudo usermod -aG input $USER")
             print("  sudo modprobe uinput")
-            openvr.shutdown()
+            vr_backend.shutdown()
             return 1
         
         print("Virtual gamepad created")
@@ -95,10 +95,12 @@ class Application:
                 
                 try:
                     self.engine.update()
-                except openvr.OpenVRError as e:
+                except vr_backend.SessionEnded as e:
+                    print(e)
+                    return 0
+                except vr_backend.OpenVRError as e:
                     print(f"OpenVR error: {e}")
-                    time.sleep(1)
-                    continue
+                    return 1
                 
                 elapsed = time.perf_counter() - start
                 sleep_time = frame_time - elapsed
@@ -109,7 +111,7 @@ class Application:
             print("Cleaning up...")
             if self.engine:
                 self.engine.close()
-            openvr.shutdown()
+            vr_backend.shutdown()
             print("Done")
         
         return 0

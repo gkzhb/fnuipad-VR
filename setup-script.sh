@@ -4,6 +4,11 @@
 
 set -e
 
+if [ -e /etc/NIXOS ]; then
+    echo "On NixOS use nix develop and declarative uinput rules; see README.md."
+    exit 1
+fi
+
 echo "VR Gamepad Setup"
 echo "================"
 echo
@@ -68,10 +73,10 @@ echo
 # Install Python dependencies
 echo "Installing Python dependencies..."
 if command -v pip3 &> /dev/null; then
-    sudo -u "$ACTUAL_USER" pip3 install --user evdev openvr
+    sudo -u "$ACTUAL_USER" pip3 install --user --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r "$(dirname "$0")/requirements.txt"
     echo "  Done"
 else
-    echo "  pip3 not found - install python-evdev and openvr manually"
+    echo "  pip3 not found - install requirements.txt dependencies manually"
 fi
 
 echo

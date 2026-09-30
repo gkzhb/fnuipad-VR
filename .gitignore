@@ -1,0 +1,7 @@
+.venv/
+.venv.backup.*/
+__pycache__/
+*.py[cod]
+result
+result-*
+.pi/tasks/

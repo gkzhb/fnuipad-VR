@@ -8,19 +8,17 @@ Features:
 - Left/right tilt for roll (ailerons)
 - Twist for rudder (yaw)
 - Throttle on separate controller (left hand)
-- VR overlays for visualization
+- Background OpenVR tracking (no VR visualization)
 """
 
 from collections import deque
 from math import pi, atan2, sin, cos, sqrt, asin
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List
-import copy
-import os
 import time
 
-import numpy as np
-import openvr
+from _openvr import get_backend
+import warnings
 
 from _linuxgamepad import LinuxGamepad
 
@@ -42,83 +40,6 @@ GENERIC_VENDOR = 0x1234
 GENERIC_PRODUCT = 0xBEAD
 GENERIC_VERSION = 0x0001
 GENERIC_NAME = "VR Flight Stick"
-
-
-def init_rotation_matrix(axis: int, angle: float, matrix=None):
-    """
-    Initialize a rotation matrix for a given axis and angle.
-
-    Args:
-        axis: 0=X, 1=Y, 2=Z
-        angle: Rotation angle in radians
-        matrix: Optional existing matrix to modify
-
-    Returns:
-        HmdMatrix34_t rotation matrix
-    """
-    if matrix is None:
-        matrix = openvr.HmdMatrix34_t()
-
-    if axis == 0:  # X axis
-        matrix.m[0][0] = 1.0
-        matrix.m[0][1] = 0.0
-        matrix.m[0][2] = 0.0
-        matrix.m[0][3] = 0.0
-        matrix.m[1][0] = 0.0
-        matrix.m[1][1] = cos(angle)
-        matrix.m[1][2] = -sin(angle)
-        matrix.m[1][3] = 0.0
-        matrix.m[2][0] = 0.0
-        matrix.m[2][1] = sin(angle)
-        matrix.m[2][2] = cos(angle)
-        matrix.m[2][3] = 0.0
-    elif axis == 1:  # Y axis
-        matrix.m[0][0] = cos(angle)
-        matrix.m[0][1] = 0.0
-        matrix.m[0][2] = sin(angle)
-        matrix.m[0][3] = 0.0
-        matrix.m[1][0] = 0.0
-        matrix.m[1][1] = 1.0
-        matrix.m[1][2] = 0.0
-        matrix.m[1][3] = 0.0
-        matrix.m[2][0] = -sin(angle)
-        matrix.m[2][1] = 0.0
-        matrix.m[2][2] = cos(angle)
-        matrix.m[2][3] = 0.0
-    elif axis == 2:  # Z axis
-        matrix.m[0][0] = cos(angle)
-        matrix.m[0][1] = -sin(angle)
-        matrix.m[0][2] = 0.0
-        matrix.m[0][3] = 0.0
-        matrix.m[1][0] = sin(angle)
-        matrix.m[1][1] = cos(angle)
-        matrix.m[1][2] = 0.0
-        matrix.m[1][3] = 0.0
-        matrix.m[2][0] = 0.0
-        matrix.m[2][1] = 0.0
-        matrix.m[2][2] = 1.0
-        matrix.m[2][3] = 0.0
-
-    return matrix
-
-
-def mat_mul_33(a, b, result=None):
-    """Multiply two 3x3 portions of HmdMatrix34_t matrices"""
-    if result is None:
-        result = openvr.HmdMatrix34_t()
-
-    for i in range(3):
-        for j in range(3):
-            result.m[i][j] = 0.0
-            for k in range(3):
-                result.m[i][j] += a.m[i][k] * b.m[k][j]
-
-    # Copy translation from b
-    result.m[0][3] = b.m[0][3]
-    result.m[1][3] = b.m[1][3]
-    result.m[2][3] = b.m[2][3]
-
-    return result
 
 
 @dataclass
@@ -206,206 +127,6 @@ class FlightStickConfig:
     device_product: int = HONEYCOMB_PRODUCT
 
 
-class FlightStickImage:
-    """VR overlay showing the flight stick"""
-
-    def __init__(self, anchor: Point, length: float = 0.5):
-        self.vrsys = openvr.VRSystem()
-        self.vroverlay = openvr.IVROverlay()
-
-        self.anchor = anchor
-        self.length = length
-
-        # Create stick overlay (using a simple cylindrical representation)
-        self.stick = self.vroverlay.createOverlay(
-            'fnuivpad_flightstick', 'fnuivpad_flightstick'
-        )
-
-        # Create grip/handle overlay at top of stick
-        self.grip = self.vroverlay.createOverlay(
-            'fnuivpad_flightstick_grip', 'fnuivpad_flightstick_grip'
-        )
-
-        self.vroverlay.setOverlayColor(self.stick, 0.3, 0.3, 0.3)  # Dark gray
-        self.vroverlay.setOverlayAlpha(self.stick, 0.8)
-        self.vroverlay.setOverlayWidthInMeters(self.stick, length)  # Match stick length
-
-        self.vroverlay.setOverlayColor(self.grip, 0.1, 0.1, 0.1)  # Black grip
-        self.vroverlay.setOverlayAlpha(self.grip, 0.9)
-        self.vroverlay.setOverlayWidthInMeters(self.grip, 0.06)  # Thicker grip
-
-        # Load images - use existing joystick image for grip
-        this_dir = os.path.abspath(os.path.dirname(__file__))
-        joystick_img = os.path.join(this_dir, 'media', 'joystick.png')
-
-        # Use joystick image for the grip (top of stick)
-        if os.path.exists(joystick_img):
-            self.vroverlay.setOverlayFromFile(self.grip, joystick_img)
-            self.vroverlay.setOverlayWidthInMeters(self.grip, length * 0.4)  # Scale with stick length
-
-        # Stick shaft uses default colored overlay (no image needed)
-
-        # Create transform matrices
-        self.stick_transform = openvr.HmdMatrix34_t()
-        self.grip_transform = openvr.HmdMatrix34_t()
-
-        # Initialize to identity
-        for i in range(3):
-            for j in range(4):
-                self.stick_transform.m[i][j] = 1.0 if i == j else 0.0
-                self.grip_transform.m[i][j] = 1.0 if i == j else 0.0
-
-        # Set initial position
-        self.stick_transform.m[0][3] = anchor.x
-        self.stick_transform.m[1][3] = anchor.y + length / 2  # Center of stick
-        self.stick_transform.m[2][3] = anchor.z
-
-        self.grip_transform.m[0][3] = anchor.x
-        self.grip_transform.m[1][3] = anchor.y + length  # Top of stick
-        self.grip_transform.m[2][3] = anchor.z
-
-        self.vroverlay.setOverlayTransformAbsolute(
-            self.stick, openvr.TrackingUniverseSeated, self.stick_transform
-        )
-        self.vroverlay.setOverlayTransformAbsolute(
-            self.grip, openvr.TrackingUniverseSeated, self.grip_transform
-        )
-
-        self.vroverlay.showOverlay(self.stick)
-        self.vroverlay.showOverlay(self.grip)
-
-        self.rotation_matrix = None
-
-    def update(self, pitch: float, roll: float, anchor: Point, length: float, twist: float = 0.0):
-        """Update stick position and rotation based on pitch, roll, and twist (rudder)"""
-        if self.rotation_matrix is None:
-            self.rotation_matrix = openvr.HmdMatrix34_t()
-
-        # Calculate stick tip position based on pitch and roll
-        # Pitch: rotation around X axis (forward/back)
-        # Roll: rotation around Z axis (left/right)
-        # Twist: rotation around Y axis (rudder)
-        # Negate angles so overlay follows controller direction
-
-        # Start with identity
-        result = openvr.HmdMatrix34_t()
-        for i in range(3):
-            for j in range(4):
-                result.m[i][j] = 1.0 if i == j else 0.0
-
-        # Apply roll rotation (around Z) - negated to follow controller
-        roll_mat = init_rotation_matrix(2, -roll)
-        result = mat_mul_33(roll_mat, result)
-
-        # Apply pitch rotation (around X) - negated to follow controller
-        pitch_mat = init_rotation_matrix(0, -pitch)
-        result = mat_mul_33(pitch_mat, result)
-
-        # Set position (anchor + rotated offset for stick center)
-        stick_center_y = length / 2
-        grip_y = length
-
-        # Rotated positions
-        result.m[0][3] = anchor.x + result.m[0][1] * stick_center_y
-        result.m[1][3] = anchor.y + result.m[1][1] * stick_center_y
-        result.m[2][3] = anchor.z + result.m[2][1] * stick_center_y
-
-        self.vroverlay.setOverlayTransformAbsolute(
-            self.stick, openvr.TrackingUniverseSeated, result
-        )
-
-        # Grip position at top of stick - also apply twist rotation
-        grip_result = copy.copy(result)
-        grip_result.m[0][3] = anchor.x + result.m[0][1] * grip_y
-        grip_result.m[1][3] = anchor.y + result.m[1][1] * grip_y
-        grip_result.m[2][3] = anchor.z + result.m[2][1] * grip_y
-
-        # Apply twist (rudder) rotation around Y axis to the grip
-        twist_mat = init_rotation_matrix(1, -twist)
-        grip_result = mat_mul_33(twist_mat, grip_result)
-
-        self.vroverlay.setOverlayTransformAbsolute(
-            self.grip, openvr.TrackingUniverseSeated, grip_result
-        )
-
-    def hide(self):
-        self.vroverlay.hideOverlay(self.stick)
-        self.vroverlay.hideOverlay(self.grip)
-
-    def show(self):
-        self.vroverlay.showOverlay(self.stick)
-        self.vroverlay.showOverlay(self.grip)
-
-    def destroy(self):
-        """Clean up overlays"""
-        try:
-            self.vroverlay.destroyOverlay(self.stick)
-            self.vroverlay.destroyOverlay(self.grip)
-        except Exception:
-            pass
-
-
-class ThrottleImage:
-    """VR overlay showing the throttle lever"""
-
-    def __init__(self, anchor: Point, range_meters: float = 0.3):
-        self.vrsys = openvr.VRSystem()
-        self.vroverlay = openvr.IVROverlay()
-
-        self.anchor = anchor
-        self.range = range_meters
-
-        # Create throttle lever overlay
-        self.lever = self.vroverlay.createOverlay(
-            'fnuivpad_throttle', 'fnuivpad_throttle'
-        )
-
-        self.vroverlay.setOverlayColor(self.lever, 1.0, 1.0, 1.0)  # White (use image colors)
-        self.vroverlay.setOverlayAlpha(self.lever, 0.9)
-        self.vroverlay.setOverlayWidthInMeters(self.lever, 0.08)
-
-        # Load throttle image
-        this_dir = os.path.abspath(os.path.dirname(__file__))
-        throttle_img = os.path.join(this_dir, 'media', 'throttle.png')
-        if os.path.exists(throttle_img):
-            self.vroverlay.setOverlayFromFile(self.lever, throttle_img)
-
-        # Transform
-        self.transform = openvr.HmdMatrix34_t()
-        for i in range(3):
-            for j in range(4):
-                self.transform.m[i][j] = 1.0 if i == j else 0.0
-
-        self.transform.m[0][3] = anchor.x
-        self.transform.m[1][3] = anchor.y
-        self.transform.m[2][3] = anchor.z
-
-        self.vroverlay.setOverlayTransformAbsolute(
-            self.lever, openvr.TrackingUniverseSeated, self.transform
-        )
-
-        self.vroverlay.showOverlay(self.lever)
-
-    def update(self, throttle_value: float):
-        """Update throttle lever position (0-1), forward/backward on Z axis"""
-        self.transform.m[2][3] = self.anchor.z - (throttle_value * self.range)  # Forward = more throttle
-        self.vroverlay.setOverlayTransformAbsolute(
-            self.lever, openvr.TrackingUniverseSeated, self.transform
-        )
-
-    def hide(self):
-        self.vroverlay.hideOverlay(self.lever)
-
-    def show(self):
-        self.vroverlay.showOverlay(self.lever)
-
-    def destroy(self):
-        try:
-            self.vroverlay.destroyOverlay(self.lever)
-        except Exception:
-            pass
-
-
 class FlightStick:
     """
     VR Flight Stick (Stick Yoke) + Throttle Controller
@@ -423,6 +144,7 @@ class FlightStick:
                  gamepad: Optional[LinuxGamepad] = None):
         self.config = config or FlightStickConfig()
 
+        self.vrsys = get_backend()
         # Create or use provided gamepad
         if gamepad is None:
             self.gamepad = LinuxGamepad(
@@ -435,11 +157,9 @@ class FlightStick:
             self.gamepad = gamepad
             self._owns_gamepad = False
 
-        self.vrsys = openvr.VRSystem()
-
-        # VR overlays
-        self.stick_image: Optional[FlightStickImage] = None
-        self.throttle_image: Optional[ThrottleImage] = None
+        if self.config.show_stick or self.config.show_throttle:
+            warnings.warn("OpenVR background mode has no VR overlays; display settings are ignored.",
+                          RuntimeWarning, stacklevel=2)
 
         # Anchor points
         x, y, z = self.config.stick_anchor
@@ -478,27 +198,13 @@ class FlightStick:
         self._last_update_time: Optional[float] = None
 
     def _find_controllers(self):
-        """Find left and right controller indices"""
-        for i in range(openvr.k_unMaxTrackedDeviceCount):
-            device_class = self.vrsys.getTrackedDeviceClass(i)
-            if device_class == openvr.TrackedDeviceClass_Controller:
-                role = self.vrsys.getControllerRoleForTrackedDeviceIndex(i)
-                if role == openvr.TrackedControllerRole_LeftHand:
-                    self._left_id = i
-                elif role == openvr.TrackedControllerRole_RightHand:
-                    self._right_id = i
+        self._left_id, self._right_id = 'left', 'right'
 
     def _get_controller_pose(self, controller_id: int):
         """Get controller position and rotation matrix"""
-        poses = self.vrsys.getDeviceToAbsoluteTrackingPose(
-            openvr.TrackingUniverseSeated, 0,
-            openvr.k_unMaxTrackedDeviceCount
-        )
-        pose = poses[controller_id]
-        if pose.bPoseIsValid:
-            m = pose.mDeviceToAbsoluteTracking
-            position = Point(m[0][3], m[1][3], m[2][3])
-            return position, m
+        m = self.vrsys.controller(controller_id).matrix
+        if m is not None:
+            return Point(m[0][3], m[1][3], m[2][3]), m
         return Point(0, 0, 0), None
 
     def _get_controller_point(self, controller_id: int) -> Point:
@@ -545,13 +251,8 @@ class FlightStick:
 
     def _read_controller_buttons(self, controller_id: int) -> Tuple[bool, bool]:
         """Read grip and trigger state from controller"""
-        result, state = self.vrsys.getControllerState(controller_id)
-        if not result:
-            return False, False
-
-        grip = bool(state.ulButtonPressed & (1 << openvr.k_EButton_Grip))
-        trigger = bool(state.ulButtonPressed & (1 << openvr.k_EButton_SteamVR_Trigger))
-        return grip, trigger
+        buttons = self.vrsys.controller(controller_id).buttons
+        return buttons.get('grip_click', False), buttons.get('trigger_click', False)
 
     def _get_stick_grip_position(self) -> Point:
         """
@@ -808,31 +509,9 @@ class FlightStick:
         self.gamepad.set_stick('left', self._rudder, throttle_axis)
         self.gamepad.sync()
 
-    def render(self):
-        """Update VR overlays"""
-        if self.stick_image is not None and self.config.show_stick:
-            # Convert axis values to angles for visualization
-            max_angle = self.config.max_deflection_degrees * pi / 180.0
-            max_twist = self.config.max_twist_degrees * pi / 180.0
-            pitch_angle = self._pitch * max_angle
-            roll_angle = self._roll * max_angle
-            twist_angle = self._rudder * max_twist
-
-            self.stick_image.update(pitch_angle, roll_angle,
-                                   self.stick_anchor, self.config.stick_length,
-                                   twist_angle)
-            self.stick_image.show()
-        elif self.stick_image is not None:
-            self.stick_image.hide()
-
-        if self.throttle_image is not None and self.config.show_throttle:
-            self.throttle_image.update(self._throttle)
-            self.throttle_image.show()
-        elif self.throttle_image is not None:
-            self.throttle_image.hide()
-
     def update(self):
         """Main update loop - call every frame"""
+        self.vrsys.update()
         # Calculate delta time
         current_time = time.perf_counter()
         if self._last_update_time is None:
@@ -848,20 +527,17 @@ class FlightStick:
         if self._left_id is None or self._right_id is None:
             return
 
+        if not all(self.vrsys.controller(hand).pose_valid for hand in ('left', 'right')):
+            self._stick_grabbed = self._throttle_grabbed = False
+            self._prev_left_grip = self._prev_right_grip = False
+            self._grab_start_yaw = self._throttle_grab_start_z = None
+            self._pitch = self._roll = self._rudder = self._throttle = 0.0
+            self.send_to_gamepad()
+            return
+
         # Get controller positions and rotations
         right_pos, right_rotation = self._get_controller_pose(self._right_id)
         left_pos, _ = self._get_controller_pose(self._left_id)
-
-        # Initialize overlays on first update
-        if self.stick_image is None:
-            self.stick_image = FlightStickImage(
-                self.stick_anchor, self.config.stick_length
-            )
-
-        if self.throttle_image is None:
-            self.throttle_image = ThrottleImage(
-                self.throttle_anchor, self.config.throttle_range
-            )
 
         # Read button states
         right_grip, right_trigger = self._read_controller_buttons(self._right_id)
@@ -890,36 +566,17 @@ class FlightStick:
         # Send to gamepad
         self.send_to_gamepad()
 
-        # Update overlays
-        self.render()
-
     def edit_mode(self):
-        """Edit mode for positioning the stick anchor"""
-        if self._right_id is None or self._left_id is None:
+        """Calibrate anchors in LOCAL space without an overlay."""
+        self.vrsys.update()
+        self._find_controllers()
+        if not all(self.vrsys.controller(hand).pose_valid for hand in ('left', 'right')):
             return
-
-        result, state_r = self.vrsys.getControllerState(self._right_id)
-        result_l, state_l = self.vrsys.getControllerState(self._left_id)
-
-        # Show overlays
-        if self.stick_image:
-            self.stick_image.show()
-        if self.throttle_image:
-            self.throttle_image.show()
-
-        # Right trigger sets stick anchor
-        if state_r.ulButtonPressed & (1 << openvr.k_EButton_SteamVR_Trigger):
-            right_pos = self._get_controller_point(self._right_id)
-            self.stick_anchor = Point(right_pos.x, right_pos.y, right_pos.z)
-            self.config.stick_anchor = (right_pos.x, right_pos.y, right_pos.z)
-
-        # Left trigger sets throttle anchor
-        if state_l.ulButtonPressed & (1 << openvr.k_EButton_SteamVR_Trigger):
-            left_pos = self._get_controller_point(self._left_id)
-            self.throttle_anchor = Point(left_pos.x, left_pos.y, left_pos.z)
-            self.config.throttle_anchor = (left_pos.x, left_pos.y, left_pos.z)
-
-        self.render()
+        for hand, anchor in [('right', 'stick_anchor'), ('left', 'throttle_anchor')]:
+            if self.vrsys.controller(hand).buttons.get('trigger_click', False):
+                pos = self._get_controller_point(hand)
+                setattr(self, anchor, pos)
+                setattr(self.config, anchor, (pos.x, pos.y, pos.z))
 
     def get_axis_values(self) -> dict:
         """Get current axis values for debugging/display"""
@@ -934,10 +591,6 @@ class FlightStick:
 
     def close(self):
         """Clean up resources"""
-        if self.stick_image:
-            self.stick_image.destroy()
-        if self.throttle_image:
-            self.throttle_image.destroy()
         if self._owns_gamepad and self.gamepad:
             self.gamepad.close()
 

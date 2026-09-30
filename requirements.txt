@@ -1,3 +1,4 @@
 evdev
-openvr
-numpy
+openvr==1.26.701
+# OpenVR imports pkg_resources, removed in setuptools 81+.
+setuptools==80.9.0

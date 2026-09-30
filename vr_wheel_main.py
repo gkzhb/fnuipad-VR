@@ -3,7 +3,7 @@
 VR Steering Wheel - Main entry point
 
 Runs the VR steering wheel simulator.
-Requires SteamVR to be running.
+Requires SteamVR; connects as an OpenVR Background application.
 
 Usage:
     python vr_wheel_main.py                    # Run with default settings
@@ -18,7 +18,7 @@ import signal
 import argparse
 from dataclasses import asdict
 
-import openvr
+import _openvr as vr_backend
 
 from _wheel import Wheel, WheelConfig, G29_NAME, G29_VENDOR, G29_PRODUCT
 
@@ -48,16 +48,16 @@ class WheelApplication:
         print(f"Inertia: {self.config.inertia}")
         print()
 
-        # Initialize OpenVR
-        print("Initializing OpenVR...")
+        # Never acquire the foreground VR scene.
+        print("Initializing OpenVR Background...")
         try:
-            openvr.init(openvr.VRApplication_Overlay)
-        except openvr.OpenVRError as e:
-            print(f"Error: Could not initialize OpenVR: {e}")
-            print("Make sure SteamVR is running!")
+            vr_backend.init()
+        except vr_backend.OpenVRError as e:
+            print(f"Error: Could not initialize OpenVR Background: {e}")
+            print("Check that SteamVR is running and controllers are connected.")
             return 1
 
-        print("OpenVR initialized")
+        print("OpenVR Background initialized")
         print()
 
         # Create wheel
@@ -70,7 +70,7 @@ class WheelApplication:
             print("Make sure you have permissions for /dev/uinput:")
             print("  sudo usermod -aG input $USER")
             print("  sudo modprobe uinput")
-            openvr.shutdown()
+            vr_backend.shutdown()
             return 1
 
         print("Steering wheel created")
@@ -108,10 +108,12 @@ class WheelApplication:
                         self.wheel.edit_mode()
                     else:
                         self.wheel.update()
-                except openvr.OpenVRError as e:
+                except vr_backend.SessionEnded as e:
+                    print(e)
+                    return 0
+                except vr_backend.OpenVRError as e:
                     print(f"OpenVR error: {e}")
-                    time.sleep(1)
-                    continue
+                    return 1
 
                 elapsed = time.perf_counter() - start
                 sleep_time = frame_time - elapsed
@@ -128,7 +130,7 @@ class WheelApplication:
                     print(f"  wheel_center: {self.config.wheel_center}")
                     print(f"  wheel_size: {self.config.wheel_size:.3f}")
                 self.wheel.close()
-            openvr.shutdown()
+            vr_backend.shutdown()
             print("Done")
 
         return 0
